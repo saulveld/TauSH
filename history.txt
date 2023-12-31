@@ -1,0 +1,2 @@
+found = False
+        for char, count, fact in cls.prefixes:

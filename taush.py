@@ -2,6 +2,8 @@ import pickle
 import sys
 import re
 import readline
+import Completer
+import atexit
 import json
 import os
 import importlib.util
@@ -137,7 +139,7 @@ CommandPart.add_word_type(Access)
 
 class Variable(CommandPart):
   def __init__(self, text):
-    if isinstance(text, Variable):
+    if isinstance(text, CommandPart):
       text = text.text
     if text.startswith("@"):
       text = text [1:]
@@ -235,18 +237,85 @@ class Interpolation(CommandPart):
     self.value = s
 
   def __str__(self):
-    r = self()  
-    if r is None:
-      return ""
-    else:
-      return r
+    return self.value
   
   def __call__(self, *args):
     return evaluate(self.value)
   
+class Tokenizer:
+  def __init__(self, binaries = [],  segments = [],  prefixes = []):
+    self.binaries = binaries
+    self.segments = segments
+    self.prefixes = prefixes
+    self.token = ""
+    self.index = -1
+    self.tokens = []
+    self.builders = []
+
+  def append(self, token):
+    self.tokens.append(token)
+    if len(self.builders) > 0:
+      if len(self.tokens) - self.builders[-1][1] == self.builders[-1][0]:
+        self.tokens[self.builders[-1][1]] = self.builders[-1][2](*self.tokens[self.builders[-1][1]:])
+        self.tokens = self.tokens[:self.builders[-1][1] + 1]
+        self.builders.pop()
+    self.token = ""
+  
+  def set_builder(self, c):
+    for char, count, fact in self.prefixes:
+        if c == char:
+          self.builders.append((count, len(self.tokens), fact))
+          return  True
+    return False
+  
+  def build_binary(self, c, s):
+    for char, fact in self.binaries:
+      if c == char:
+        left = ShellCall(*self.tokens) if len(self.tokens) > 1 else self.tokens[-1]
+        right = Tokenizer(self.binaries, self.segments, self.prefixes).tokenize(s[(self.index + 1):])
+        return fact(left, right)
+    return None
+  
+  def build_segment(self, c):
+    for open_c, close_c, fact in self.segments:
+          if self.token.startswith(open_c):
+            if c == close_c:
+              self.append(fact(self.token[1:]))
+              return True
+    return False
+  
+  def tokenize(self, s):
+    for c in s:
+      self.index += 1
+      if self.token == "":
+        if not c.isspace():
+          if not self.set_builder(c):
+            b = self.build_binary(c, s)
+            if b is not None:
+              return b          
+            self.token += c
+      else:
+        if not self.build_segment(c):
+          if c.isspace():
+            self.append(CommandPart.create(self.token))
+            if len(self.builders) > 0:
+              if len(self.tokens) - self.builders[-1][1] == self.builders[-1][0]:
+                self.tokens[self.builders[-1][1]] = self.builders[-1][2](*self.tokens[self.builders[-1][1]:])
+                tokens = self.tokens[:self.builders[-1][1] + 1]
+                self.builders.pop()
+            self.token = ""
+          else:
+            self.token += c
+    if self.token != "":
+      self.append(CommandPart.create(self.token))
+    return ShellCall(*self.tokens)
+
+
 class ShellStatement:
   binaries = []
   segments = []
+  prefixes = []
+
   def __init__(self, action, arguments):
     self.action = action
     self.arguments = [a for a in arguments]
@@ -263,38 +332,13 @@ class ShellStatement:
     cls.segments.append((open_char, close_char, fact))
 
   @classmethod
-  def tokenize(cls, s):
-    tokens = []
-    token = ""
-    index = -1
-    for c in s:
-      index += 1
-      if token == "":
-        if not c.isspace():
-          for char, fact in cls.binaries:
-            if c == char:
-              left = ShellCall(*tokens) if len(tokens) > 1 else tokens[-1]
-              right = ShellStatement.tokenize(s[(index + 1):])
-              return fact(left, right)
-          token += c
-      else:
-        found = False
-        for open_c, close_c, fact in cls.segments:
-          if token.startswith(open_c):
-            if c == close_c:
-              tokens.append(fact(token[1:]))
-              token = ""
-              found = True
-        if not found:
-          if c.isspace():
-            tokens.append(CommandPart.create(token))
-            token = ""
-          else:
-            token += c
-    if token != "":
-      tokens.append(CommandPart.create(token))
-    return ShellCall(*tokens)
+  def add_prefix(cls, char, count, fact):
+    cls.prefixes.append((char, count, fact))
 
+  @classmethod
+  def tokenize(cls, s):
+    return Tokenizer(cls.binaries, cls.segments, cls.prefixes).tokenize(s)
+    
 class ShellCall(ShellStatement):
   def __init__(self, *args):
     self.arguments: [CommandPart] = [a for a in args]
@@ -346,6 +390,22 @@ class Set(ShellStatement):
   def __call__(self, *args):
     return self.left.set_value(str(self.right))
   
+class Lambda(CallablePart):
+  def __init__(self, name, interior_part):
+    super().__init__(name)
+    self.interior_part = interior_part
+    
+  def __call__(self, *args):
+    push()
+    Set(Variable(self.text), args[0])()
+    rtn = self.interior_part(*args[1:])
+    pop()
+    return rtn
+  
+  def __str__(self):
+    return f"lambda ({','.join([str(a) for a in self.arguments])}): {str(self.body)}"
+
+ShellStatement.add_prefix("\\", 2, Lambda)
 ShellStatement.add_binary("|", Pipe)
 ShellStatement.add_binary("=", Set)
 ShellStatement.add_segment("'", "'", String)
@@ -438,7 +498,7 @@ def evaluate(s):
       return None
     else:
       c = compile(s, '', 'eval')
-      r = eval(c)
+      r = eval(c, _environ_["modules"][0].__dict__, _environ_)
       return str(r)
   except Exception as e:
     print(f"Error: {str(e)}")
@@ -486,14 +546,22 @@ _environ_["modules"] = [sys.modules[__name__]] + _environ_["modules"]
 _environ_["env"] = _environ_
 
 if __name__ == "__main__":
-  try:
-    readline.read_history_file(_environ_.get("history", _default_history_ )["file"])
-    readline.set_history_length(_environ_.get("history", _default_history_ )["length"])
-  except FileNotFoundError:
-    pass
-
   for module in _environ_.get("init", _default_init_)["modules"]:
     load(module)
-
+  
   run_file(_environ_.get("init", _default_init_)["file"])
+  
+  completer = Completer.Completer(_environ_)
+  
+  try:
+    hist_file = _environ_.get("history", _default_history_ )["file"]
+    readline.read_history_file(hist_file)
+    readline.set_history_length(_environ_.get("history", _default_history_ )["length"])
+    readline.set_completer(completer.complete)
+    readline.parse_and_bind("tab: complete")
+  except FileNotFoundError:
+    pass
+  
+  atexit.register(readline.write_history_file, hist_file)
+
   repl()
