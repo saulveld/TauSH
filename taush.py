@@ -5,6 +5,7 @@ import readline
 import json
 import os
 import importlib.util
+import subprocess
 
 _newline_ = "\n"
 _environ_file_ = "_environ_.json"
@@ -14,13 +15,18 @@ _environ_ = json.load(open(_environ_file_))
 _environ_stack_ = [_environ_]
 _current_ = ""
 
-def get_command(*a):
+def get_command(name):
   for m in _environ_["modules"]:
-    if hasattr(m, a[0]):
-      command = getattr(m, a[0])
-      
-      return command
+    if hasattr(m, name):
+      command = getattr(m, name)
+      if callable(command):
+        return command
   return None
+
+def get_object(name):
+  for m in _environ_["modules"]:
+    if hasattr(m, name):
+      return getattr(m, name)
 
 def coalesce(*args):
   for arg in args:
@@ -28,8 +34,17 @@ def coalesce(*args):
       return arg
   return None
 
+def clean_string_end(s):
+  if s is None or len(s) < 1:
+    return None
+  while s[-1] in "\r\n\t ":
+    s = s[:-1]
+  return s
+
 def cmd(*a):
-  return os.system(*a)
+  proc = subprocess.Popen([str(item) for item in a], stdout=subprocess.PIPE, shell=True)
+  (out, err) = proc.communicate()
+  return clean_string_end(out.decode("utf-8"))
 
 class CommandPart:
   word_types = []
@@ -46,7 +61,7 @@ class CommandPart:
   #  return coalesce(self.data, self.command, self.name)
   
   def set_value(self, value):
-    _environ_[self.name] = value
+    _environ_[self.text] = value
 
   @classmethod
   def add_word_type(cls, t):
@@ -65,16 +80,19 @@ class CallablePart(CommandPart):
 
 class Access(CallablePart):
   def __init__(self, text):
-    super.__init__(text)
-    self.chain = [ShellStatement.tokenize(part) for part in text.split(".")]
+    super().__init__(text)
+    self.chain = [CommandPart.create(part) for part in text.split(".")]
 
   def __call__(self, *args):
     if len(self.chain) > 0:
-      current = self.chain[0](*args)
+      current = self.chain[0]
+      if callable(current):
+        current = current()
     for step in self.chain[1:]:
-      if hasattr(current, str(step)):
-        current = getattr(current, str(step))
-      else:
+      if not isinstance(current, dict):
+        current = current.__dict__
+      current = current.get(str(step), None)
+      if current is None:
         print (f"Error: {str(current)} does not have attribute {step}")
     return current
 
@@ -90,7 +108,10 @@ class Access(CallablePart):
 
   @classmethod
   def is_acceptable_input(cls, inp):
-    return re.search(r"\.[a-zA-Z_]", inp) != None
+    if isinstance(inp, str):
+      return re.search(r"\.[a-zA-Z_]", inp) != None
+    else:
+      return False
 
   class CodeCall(CallablePart):
     def __init__(self, text, command):
@@ -116,6 +137,8 @@ CommandPart.add_word_type(Access)
 
 class Variable(CommandPart):
   def __init__(self, text):
+    if isinstance(text, Variable):
+      text = text.text
     if text.startswith("@"):
       text = text [1:]
     super().__init__(text)
@@ -128,18 +151,24 @@ class Variable(CommandPart):
   
   @classmethod
   def is_acceptable_input(self, text):
-    return text.startswith("@") or text in _environ_.keys()
+    if isinstance(text, str):
+      return text.startswith("@") or text in _environ_.keys()
+    elif isinstance(text, Variable):
+      return True
   
 CommandPart.add_word_type(Variable)
 
-class CommandReference(CommandPart):
+class CommandReference(CallablePart):
   def __init__(self, text):
     super().__init__(text)
     self.command = get_command(text)
   
   def __call__(self, *args):
     try:
-      return self.command(*args)
+      if callable(self.command):
+        return self.command(*args)
+      else:
+        return self.command
     except Exception as e:
       print(f"Error: {str(self.text)} Threw: {str(e)}")
       return None
@@ -157,20 +186,33 @@ class CommandReference(CommandPart):
     
 CommandPart.add_word_type(CommandReference)      
 
-class ExternalCommand(CommandPart):
+class ObjectReference(CommandPart):
   def __init__(self, text):
     super().__init__(text)
-    
-  def to_system_string(self, *args):
-    parts = [self.text] + [str(arg) for arg in args]
-    return " ".join(parts)
-
+    self.data = get_object(text)
+  
   def __call__(self, *args):
-    return os.system(self.to_system_string())
+    return self.data
   
   def __str__(self):
     return self.text
-    
+  
+  @classmethod
+  def is_acceptable_input(self, inp):
+    return get_object(inp) is not None
+  
+CommandPart.add_word_type(ObjectReference)
+
+class ExternalCommand(CommandPart):
+  def __init__(self, text):
+    super().__init__(text)
+
+  def __call__(self, *args):
+    return cmd(*[self.text] + [str(arg) for arg in args])
+
+  def __str__(self):
+    return self.text
+
   @classmethod
   def is_acceptable_input(cls, inp):
     return True
@@ -185,7 +227,7 @@ class String(CommandPart):
     super().__init__(s)
 
   def __str__(self):
-    return f"'{self.text}'"
+    return self.text
 
 class Interpolation(CommandPart):
   def __init__(self, s):
@@ -240,14 +282,15 @@ class ShellStatement:
         for open_c, close_c, fact in cls.segments:
           if token.startswith(open_c):
             if c == close_c:
-              tokens.append(fact(token[1:-1]))
+              tokens.append(fact(token[1:]))
               token = ""
               found = True
-        if c.isspace() and not found:
-          tokens.append(CommandPart.create(token))
-          token = ""
-        else:
-          token += c
+        if not found:
+          if c.isspace():
+            tokens.append(CommandPart.create(token))
+            token = ""
+          else:
+            token += c
     if token != "":
       tokens.append(CommandPart.create(token))
     return ShellCall(*tokens)
@@ -259,20 +302,27 @@ class ShellCall(ShellStatement):
   def inject_argument(self, argument):
     self.arguments = [self.head(), argument] + self.tail()
 
+  def __str__(self):
+    return " ".join([str(a) for a in self.arguments])
+
   def head(self):
     return self.arguments[0]
   
   def tail(self):
-    return self.arguments[1:]
+    if len(self.arguments) < 2:
+      return []
+    return [str(x) for x in self.arguments[1:]]
   
   def callable_head(self):
+    if isinstance(self.head(), Access):
+      return self.head()()
     if isinstance(self.head(), CallablePart):
       return self.head()
     else:
       return ExternalCommand(self.head().text)
 
   def __call__(self, *args):
-    return self.head()(*self.tail())
+    return self.callable_head()(*self.tail())
 
 class Pipe(ShellStatement):
   def __init__(self, *statements: [ShellStatement]):
@@ -287,14 +337,14 @@ class Pipe(ShellStatement):
 
 class Set(ShellStatement):
   def __init__(self, left, right):
-    self.left  = CommandPart.create(left)
-    self.right = ShellStatement.tokenize(right)
+    self.left  = left
+    self.right = right
 
   def inject_argument(self, argument):
     self.right = str(argument)
   
   def __call__(self, *args):
-    return self.left.set_value(self.right())
+    return self.left.set_value(str(self.right))
   
 ShellStatement.add_binary("|", Pipe)
 ShellStatement.add_binary("=", Set)
@@ -335,6 +385,7 @@ def repl():
   while not is_quitting():
     if not entry_incomplete():
       run_current()
+      initial_prompt()
     else: 
       _current_ += _newline_
       continue_prompt()
@@ -352,7 +403,9 @@ def run_file(f):
 
 
 def run_current():
+  global _current_
   out = ShellStatement.tokenize(_current_)()
+  _current_ = ""
   if out is not None:
     print(out)
 
