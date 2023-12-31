@@ -1,0 +1,13 @@
+{
+  "modules": [],
+  "prompt": "pwd | echo Tau:",
+  "module_dir": "modules",
+  "history": {
+    "file": "history.txt",
+    "length": 10000
+  },
+  "init": {
+    "file": "init.tau",
+    "modules": ["std.py"]
+  }
+}

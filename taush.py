@@ -1,119 +1,195 @@
 import pickle
 import sys
-import os
-import shutil
 import re
+import readline
+import json
+import os
+import importlib.util
 
-_environ_stack_ = []
-_environ_ = {
-    "modules": [],
-    "prompt_prefix": "|",
-    "prompt_suffix": "|>",
-    "prompt": "pwd",
-    }
-
-def ls(*a):
-  return os.listdir(*a)
-
-
-def cd(*a):
-  return os.chdir(*a)
-
-
-def pwd(*a):
-  return os.getcwd(*a)
-
-
-def cmd(*a):
-  return os.system(*a)
-
-
-def mkdir(*a):
-  return os.mkdir(*a)
-
-
-def rm(*a):
-  return os.remove(*a)
-
-
-def rmdir(*a):
-  return os.rmdir(*a)
-
-
-def mv(*a):
-  return os.rename(*a)
-
-
-def cp(*a):
-  return shutil.copy(*a)
-
-
-def exp(*a):
-  return os.system(f"explorer {''.join(a)}")
-
-
-def where(input, pattern):
-  rtns = []
-  if isinstance(input, list):
-    for i in input:
-      if re.search(pattern, i) is not None:
-        rtns.append(i)
-  else:
-    if re.search(pattern, input) is not None:
-      rtns.append(input)
-  return rtns
-
-
-def interpolate(s):
-  prefix = s.split("{")[0]
-  code = s.split("{")[1].split("}")[0]
-  suffix = s.split("}")[1]
-  return f"{prefix}{eval(code)}{suffix}"
-
-
-def lines(items):
-  return '\n'.join(items)
-
+_newline_ = "\n"
+_environ_file_ = "_environ_.json"
+_default_history_ = {"file": "history.txt", "length": 1000}
+_default_init_ = {"file":"init.tau", "modules":["std.py"]}
+_environ_ = json.load(open(_environ_file_))
+_environ_stack_ = [_environ_]
+_current_ = ""
 
 def get_command(*a):
   for m in _environ_["modules"]:
     if hasattr(m, a[0]):
       command = getattr(m, a[0])
-      def rtn(*args):
-        try:
-          return command(*args)
-        except Exception as e:
-          print(f"Error: {a[0]} Threw: {str(e)}")
-          return None
-        
-    if callable(command):
-      return rtn
-    else:
+      
       return command
   return None
 
+def coalesce(*args):
+  for arg in args:
+    if arg is not None:
+      return arg
+  return None
 
-class Word:
+def cmd(*a):
+  return os.system(*a)
+
+class CommandPart:
+  word_types = []
   def __init__(self, s):
-    self.value = s
+    self.text = s
 
   def __str__(self):
-    return self.value
+    return str(self())
   
   def __call__(self, *args):
-    return get_command(self.value)
+    return self.text
+  
+  #def __call__(self, *args):
+  #  return coalesce(self.data, self.command, self.name)
+  
+  def set_value(self, value):
+    _environ_[self.name] = value
 
+  @classmethod
+  def add_word_type(cls, t):
+    cls.word_types.append(t)
 
-class String:
+  @classmethod
+  def create(cls, value):
+    for wt in cls.word_types:
+      if wt.is_acceptable_input(value):
+        return wt(value)
+    return CommandPart(value)
+
+class CallablePart(CommandPart):
   def __init__(self, s):
-    self.value = s
+    super().__init__(s)
+
+class Access(CallablePart):
+  def __init__(self, text):
+    super.__init__(text)
+    self.chain = [ShellStatement.tokenize(part) for part in text.split(".")]
+
+  def __call__(self, *args):
+    if len(self.chain) > 0:
+      current = self.chain[0](*args)
+    for step in self.chain[1:]:
+      if hasattr(current, str(step)):
+        current = getattr(current, str(step))
+      else:
+        print (f"Error: {str(current)} does not have attribute {step}")
+    return current
+
+  def set_value(self, value): 
+    if len(self.chain) > 0:
+      current = self.chain[0]()
+    for step in self.chain[1:-1]:
+      if hasattr(current, str(step)):
+        current = getattr(current, str(step))
+      else:
+        print (f"Error: {str(current)} does not have attribute {step}")
+    setattr(current, str(self.chain[-1]), value)
+
+  @classmethod
+  def is_acceptable_input(cls, inp):
+    return re.search(r"\.[a-zA-Z_]", inp) != None
+
+  class CodeCall(CallablePart):
+    def __init__(self, text, command):
+      super().__init__(text)
+      self.command = command
+
+    def __call__(self, *args):
+      return self.command(*args)
+    
+    @classmethod
+    def is_acceptable_input(cls, inp):
+      _environ_.modules[0].__dict__.keys()
+    
+  
+  class CommandCall(CallablePart):
+    def __init__(self, text):
+      super().__init__(text)
+    
+    def __call__(self, *args):
+      return cmd([self.text] + [str(a) for a in args])
+
+CommandPart.add_word_type(Access)
+
+class Variable(CommandPart):
+  def __init__(self, text):
+    if text.startswith("@"):
+      text = text [1:]
+    super().__init__(text)
+  
+  def __str__(self):
+    return _environ_[self.text]
+  
+  def __call__(self):
+    return _environ_[self.text]
+  
+  @classmethod
+  def is_acceptable_input(self, text):
+    return text.startswith("@") or text in _environ_.keys()
+  
+CommandPart.add_word_type(Variable)
+
+class CommandReference(CommandPart):
+  def __init__(self, text):
+    super().__init__(text)
+    self.command = get_command(text)
+  
+  def __call__(self, *args):
+    try:
+      return self.command(*args)
+    except Exception as e:
+      print(f"Error: {str(self.text)} Threw: {str(e)}")
+      return None
+    
+  def __str__(self):
+    return self.text
+  
+  @classmethod
+  def is_acceptable_input(self, inp):
+    cmd = get_command(inp)
+    if cmd is not None:
+      return True
+    else:
+      return False
+    
+CommandPart.add_word_type(CommandReference)      
+
+class ExternalCommand(CommandPart):
+  def __init__(self, text):
+    super().__init__(text)
+    
+  def to_system_string(self, *args):
+    parts = [self.text] + [str(arg) for arg in args]
+    return " ".join(parts)
+
+  def __call__(self, *args):
+    return os.system(self.to_system_string())
+  
+  def __str__(self):
+    return self.text
+    
+  @classmethod
+  def is_acceptable_input(cls, inp):
+    return True
+
+class Segement(CommandPart):
+  def __init__(self, start, stop):
+    self.start = start
+    self.stop = stop
+
+class String(CommandPart):
+  def __init__(self, s):
+    super().__init__(s)
 
   def __str__(self):
-    return self.value
+    return f"'{self.text}'"
 
-
-class Interpolation:
+class Interpolation(CommandPart):
   def __init__(self, s):
+    super().__init__(s)
     self.value = s
 
   def __str__(self):
@@ -125,6 +201,181 @@ class Interpolation:
   
   def __call__(self, *args):
     return evaluate(self.value)
+  
+class ShellStatement:
+  binaries = []
+  segments = []
+  def __init__(self, action, arguments):
+    self.action = action
+    self.arguments = [a for a in arguments]
+
+  def inject_argument(self, argument):
+    self.arguments = [argument] + self.arguments
+
+  @classmethod
+  def add_binary(cls, char, fcls):
+    cls.binaries.append((char, fcls))
+  
+  @classmethod
+  def add_segment(cls, open_char, close_char, fact):
+    cls.segments.append((open_char, close_char, fact))
+
+  @classmethod
+  def tokenize(cls, s):
+    tokens = []
+    token = ""
+    index = -1
+    for c in s:
+      index += 1
+      if token == "":
+        if not c.isspace():
+          for char, fact in cls.binaries:
+            if c == char:
+              left = ShellCall(*tokens) if len(tokens) > 1 else tokens[-1]
+              right = ShellStatement.tokenize(s[(index + 1):])
+              return fact(left, right)
+          token += c
+      else:
+        found = False
+        for open_c, close_c, fact in cls.segments:
+          if token.startswith(open_c):
+            if c == close_c:
+              tokens.append(fact(token[1:-1]))
+              token = ""
+              found = True
+        if c.isspace() and not found:
+          tokens.append(CommandPart.create(token))
+          token = ""
+        else:
+          token += c
+    if token != "":
+      tokens.append(CommandPart.create(token))
+    return ShellCall(*tokens)
+
+class ShellCall(ShellStatement):
+  def __init__(self, *args):
+    self.arguments: [CommandPart] = [a for a in args]
+
+  def inject_argument(self, argument):
+    self.arguments = [self.head(), argument] + self.tail()
+
+  def head(self):
+    return self.arguments[0]
+  
+  def tail(self):
+    return self.arguments[1:]
+  
+  def callable_head(self):
+    if isinstance(self.head(), CallablePart):
+      return self.head()
+    else:
+      return ExternalCommand(self.head().text)
+
+  def __call__(self, *args):
+    return self.head()(*self.tail())
+
+class Pipe(ShellStatement):
+  def __init__(self, *statements: [ShellStatement]):
+    self.statements = statements
+  
+  def __call__(self, *args: [CommandPart]):
+    index = 0
+    while index < (len(self.statements) - 1):
+      self.statements[index + 1].inject_argument(self.statements[index]())
+      index += 1
+    return self.statements[-1]()
+
+class Set(ShellStatement):
+  def __init__(self, left, right):
+    self.left  = CommandPart.create(left)
+    self.right = ShellStatement.tokenize(right)
+
+  def inject_argument(self, argument):
+    self.right = str(argument)
+  
+  def __call__(self, *args):
+    return self.left.set_value(self.right())
+  
+ShellStatement.add_binary("|", Pipe)
+ShellStatement.add_binary("=", Set)
+ShellStatement.add_segment("'", "'", String)
+ShellStatement.add_segment('"', '"', String)
+ShellStatement.add_segment("{", "}", Interpolation)
+
+def count_chars(c, s):
+  count = 0
+  for char in s:
+    if char == c:
+      count += 1
+  return count
+
+def still_open(o, c):
+  if o == c:
+    return count_chars(o, _current_) % 2 != 0
+  else:
+    return count_chars(o, _current_) > count_chars(c, _current_)
+
+def entry_incomplete():
+  return any([still_open(o, c) for o, c, _ in ShellStatement.segments])
+
+def is_quitting():
+  return _current_.lower() == "quit"
+
+def continue_prompt():
+  global _current_
+  _current_ += input(f'{str(count_chars(_newline_, _current_))}') + _newline_
+
+def initial_prompt():
+  global _current_
+  _current_ = input(ShellStatement.tokenize(_environ_["prompt"])())  
+
+def repl():
+  global _current_
+  initial_prompt()
+  while not is_quitting():
+    if not entry_incomplete():
+      run_current()
+    else: 
+      _current_ += _newline_
+      continue_prompt()
+
+
+def run_file(f):
+  global _current_
+  lines = open(f).readlines()
+  for line in lines:
+    _current_ += line
+    if entry_incomplete():
+      _current_ += _newline_
+    else:
+      run_current()
+
+
+def run_current():
+  out = ShellStatement.tokenize(_current_)()
+  if out is not None:
+    print(out)
+
+
+def load(*a):
+  # load a module into modules
+  local_modules = os.listdir(_environ_["module_dir"])
+  for item in a:
+    if item in local_modules:
+      if item.endswith(".py"):
+        name = item.split(".")[0]
+        path = f'{_environ_["module_dir"]}/{item}'
+        spec = importlib.util.spec_from_file_location(name, path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _environ_["modules"].append(mod)
+        _environ_[name] = mod
+      elif a.endswith(".tau"):
+        run_file(f'{_environ_["module_dir"]}/{item}')
+    else:
+      _environ_[item] = __import__(item)
+      _environ_["modules"].append(_environ_[item] )
+      _environ_["modules"][0].__dict__[item] = _environ_[item]
 
 
 def evaluate(s):
@@ -139,178 +390,10 @@ def evaluate(s):
   except Exception as e:
     print(f"Error: {str(e)}")
     return None
-
-class ShellCall:
-  def __init__(self, *args):
-    self.args = args  
-
-  def __call__(self, *args):
-    if isinstance(self.args[0], Interpolation):
-      return self.args[0](*args)
-    command = self.args[0]()
-    if command is not None:
-      input = []
-      if len(args) > 0:
-        input += args
-      if len(self.args) > 1:
-        input += [str(x) for x in self.args[1:]]
-        if callable(command):
-          return command(*input)  
-        return command
-    else:
-      return cmd(''.join([str(p) for p in self.args]))
   
 
-class Pipe:
-  def __init__(self, left, right):
-    self.left = left
-    self.right = right
-  
-  def __call__(self, *args):
-    return self.right(self.left(*args))
-
-
-class Access:
-  def __init__(self, chain):
-    self.chain = chain
-  
-  def __call__(self, *args):
-    if len(self.chain) > 0:
-      current = self.chain[0](*args)
-    for step in self.chain[1:]:
-      if hasattr(current, str(step)):
-        current = getattr(current, str(step))
-      else:
-        print (f"Error: {str(current)} does not have attribute {step}")
-    return current
-  
-  def set_value(self, value): 
-    if len(self.chain) > 0:
-      current = self.chain[0]()
-    for step in self.chain[1:-1]:
-      if hasattr(current, str(step)):
-        current = getattr(current, str(step))
-      else:
-        print (f"Error: {str(current)} does not have attribute {step}")
-    setattr(current, str(self.chain[-1]), value)
-  
-
-class Variable:
-  def __init__(self, name):
-    self.name = name
-  
-  def __call__(self, *args):
-    return _environ_[self.name]
-  
-  def __str__(self):
-    return _environ_[self.name]
-  
-  def set_value(self, value):
-    _environ_[self.name] = value
-
-
-class Set:
-  def __init__(self, left, right):
-    self.left = left
-    self.right = right
-  
-  def __call__(self, *args):
-    self.left.set_value(self.right(*args))
-    return self.left(*args)
- 
-
-def tokenize(s):
-  def factory(s):
-    parts = list(map(lambda p: Variable(p[1:]) if p.startswith("@") else Word(p), s.split(".")))
-    if len(parts) > 1:
-      return Access(parts)
-    else:
-      return parts[0]
-  tokens = []
-  token = ""
-  index = -1
-  for c in s:
-    index += 1
-    if token == "":
-      if not c.isspace():
-        if c == "|":
-          return Pipe(ShellCall(*tokens), tokenize(s[(index + 1):]))
-        token += c
-    elif token.startswith('{'):
-      token += c
-      if c == '}':
-        tokens.append(Interpolation(token[1:-1]))
-        token = ""
-    elif token.startswith("'"):
-      token += c
-      if c == "'":
-        tokens.append(String(token[1:-1]))
-        token = ""
-    elif c.isspace():
-      if token != "":
-        tokens.append(factory(token))
-        token = ""
-    else:
-      token += c
-  if token != "":
-    tokens.append(factory(token))
-  return ShellCall(*tokens)
-
-
-def prmpt():
-  return input(f"{Variable('prompt_prefix')()}{tokenize(_environ_['prompt'])()}{Variable('prompt_suffix')()}")
-
-
-def cont():
-  return input("...")
-
-
-def count_chars(c, s):
-  count = 0
-  for char in s:
-    if char == c:
-      count += 1
-  return count
-
-
-def repl():
-  in_interpolation = False
-  complete = False
-  raw = prmpt()
-  while not complete:
-    opens = count_chars("{", raw)
-    closes = count_chars("}", raw)
-    in_interpolation = opens > closes
-    if not in_interpolation:
-      if raw.lower() == "quit":
-        complete = True
-      else:
-        out = tokenize(raw)()
-        if out is not None:
-          print(out)
-        raw = prmpt() 
-    else: 
-      raw += cont() + "\n"
-
-
-def echo(*a):
-  return ' '.join(a)
-
-
-def set(*a):
-  return os.environ.__setitem__(*a)
-
- 
-def load(*a):
-  # load a module into modules
-  _environ_[a[0]] = __import__(*a)
-  _environ_["modules"].append(_environ_[a[0]] )
-  _environ_["modules"][0].__dict__[a[0]] = _environ_[a[0]]
-
-
-def runpy(*a):
-  # run a script
-  exec(open(*a).read())
+def runpy(item):
+  return exec(open(item).read())
 
 
 def save(*a):
@@ -346,10 +429,18 @@ def pop(*a):
   _environ_ = _environ_stack_.pop()
   return "Environment Copy Popped"
 
-_environ_["modules"] = [sys.modules[__name__]]
+_environ_["modules"] = [sys.modules[__name__]] + _environ_["modules"]
 _environ_["env"] = _environ_
 
 if __name__ == "__main__":
-  repl()
+  try:
+    readline.read_history_file(_environ_.get("history", _default_history_ )["file"])
+    readline.set_history_length(_environ_.get("history", _default_history_ )["length"])
+  except FileNotFoundError:
+    pass
 
-# i could be a pickle or a file or a pip module.
+  for module in _environ_.get("init", _default_init_)["modules"]:
+    load(module)
+
+  run_file(_environ_.get("init", _default_init_)["file"])
+  repl()
