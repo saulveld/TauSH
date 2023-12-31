@@ -9,7 +9,7 @@ def ls(*a):
 
 
 def cd(*a):
-  return os.chdir([str(i) for i in a])
+  return os.chdir(str(a[0]))
 
 
 def pwd(*a):
