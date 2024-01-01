@@ -1,2 +1,14 @@
 found = False
         for char, count, fact in cls.prefixes:
+ls
+type 'README.md'
+promp = echo T:
+prompt = echo T:
+ls
+pwd
+cd ..
+cd '..'
+cd '..
+'
+cd .
+cd modules

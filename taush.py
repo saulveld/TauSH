@@ -242,6 +242,7 @@ class Interpolation(CommandPart):
   def __call__(self, *args):
     return evaluate(self.value)
   
+
 class Tokenizer:
   def __init__(self, binaries = [],  segments = [],  prefixes = []):
     self.binaries = binaries
@@ -309,7 +310,6 @@ class Tokenizer:
     if self.token != "":
       self.append(CommandPart.create(self.token))
     return ShellCall(*self.tokens)
-
 
 class ShellStatement:
   binaries = []
@@ -412,6 +412,7 @@ ShellStatement.add_segment("'", "'", String)
 ShellStatement.add_segment('"', '"', String)
 ShellStatement.add_segment("{", "}", Interpolation)
 
+
 def count_chars(c, s):
   count = 0
   for char in s:
@@ -503,7 +504,38 @@ def evaluate(s):
   except Exception as e:
     print(f"Error: {str(e)}")
     return None
-  
+
+def lisp(s, d):
+  def string_lisp(string):
+    def atoms_to_lisp(atoms):
+      items = []
+      for i, atom in enumerate(atoms):
+        if atoms == '[':
+          items += atoms_to_lisp(atoms[i+1:])
+        elif atoms[0] == ']':
+          items = [items]
+        else:
+          items.append(atom)
+      return items
+    atoms_to_lisp(string.replace('[', ' [ ').replace(']', ' ] ').split())
+  def run(l):
+    if isinstance(l, list):
+      if not isinstance(l[0], list):
+        v = d.get(l[0], None)         
+        if v is not None and callable(v):
+          return v(*[run(i) for i in l[1:]])
+      else:
+        return [run(i) for i in l]
+    else:
+      v = d.get(l, None)
+      if v is not None:
+        if callable(v):
+          return v()
+        else:
+          return v
+      else:
+        return l
+  return run(string_lisp(s))  
 
 def runpy(item):
   return exec(open(item).read())
