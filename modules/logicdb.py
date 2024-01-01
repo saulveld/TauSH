@@ -1,8 +1,6 @@
 import sqlite3
 import taush
-
-                          
-                     
+      
 
 def _dict_factory(cursor, row):
     d = {}
@@ -282,8 +280,7 @@ class LogicDB:
     field_names = [f.split()[0] for f in cls.fields.split(",")]
     return self.data_query(f"SELECT {','.join(field_names)} FROM {cls.table_name}", cls)
 
-  def run(self, lst):
-    
+  def run(self, *lst):
     if isinstance(lst[-1], list):
       r = RuleDefinition.from_list(lst)
       self.add_rule(r)
@@ -293,6 +290,10 @@ class LogicDB:
         return self.add_fact(f)
       else:
         return self.query(f)
+      
+  def fact_check(self, *args):
+    f = FactDefinition.from_list(args)
+    return len(self.query(f)) > 0
   
   def find_predicate(self, name, arity):
     for predicate in self.predicates.values():
@@ -365,7 +366,10 @@ class LogicDB:
       self.predicate_parts[part.predicate_part_id] = part
     return predicate
 
-  def query(self,  fact_definition):
+  def query(self, fact_definition):
+    # there should be a _result_number_ for each row so that. 
+    # when there are no variables there is still a response.
+    
     predicate = self.find_predicate(fact_definition.predicate_name, len(fact_definition.arguments))
     if predicate is None:
       raise Exception(f"Predicate {fact_definition.predicate_name}/{len(fact_definition.arguments)} not found")
@@ -402,6 +406,7 @@ class LogicDB:
 taush._environ_["ldb"] = LogicDB("logic.db")
 taush._environ_["lisp"] = taush.taush._environ_["lisp"] | {
   "!": lambda *args: taush._environ_["ldb"].run(list(args)),
+  "?": lambda *args: taush._environ_["ldb"].fact_check(list(args)),
   "predicate": lambda *args: taush._environ_["ldb"].create_predicate(*args),
   "link": lambda *args: taush._environ_["ldb"].create_link(*args),
 }
