@@ -1,6 +1,7 @@
+import sys
+sys.path.append('.')
 import sqlite3
 import taush
-      
 
 def _dict_factory(cursor, row):
     d = {}
@@ -11,14 +12,20 @@ def _dict_factory(cursor, row):
 def _quote(v):
   return f"'{v}'"
 
+def _block_quote(v):
+  return f"[{v}]"
+
+def _variablize(v):
+  return f":{v}"
+
 class Argument:
   def __init__(self, argument_number, argument_type, value):
     self.argument_type = argument_type
     self.value = value
 
 class RuleArgument(Argument):
-  table_name = "rule_arguments"
-  fields = "id INTEGER AUTOINCREMENT PRIMARYKEY,rule_id INTEGER,seq INTEGER,argument TEXT,argument_type TEXT"
+  table_name = "rule_argument"
+  fields = "id INTEGER PRIMARY KEY AUTOINCREMENT ,rule_id INTEGER,seq INTEGER,argument TEXT,argument_type TEXT"
 
   def __init__(self, argument_number, argument_type, value):
     super().__init__(argument_number, argument_type, value)
@@ -35,8 +42,8 @@ class RuleArgument(Argument):
       return f"'{self.value}'"
 
 class QueryArgument(Argument):
-  table_name = "query_arguments"
-  fields = "id INTEGER AUTOINCREMENT PRIMARYKEY,query_id INTEGER,seq INTEGER,argument TEXT,argument_type TEXT"
+  table_name = "query_argument"
+  fields = "id INTEGER PRIMARY KEY AUTOINCREMENT ,query_id INTEGER,seq INTEGER,argument TEXT,argument_type TEXT"
                               
   def __init__(self, argument_number, argument_type, value):
     super().__init__(argument_number, argument_type, value)
@@ -49,8 +56,8 @@ class QueryArgument(Argument):
     self.query.arguments.append(self)
 
 class Query:
-  table_name = "queries"
-  fields = "id INTEGER AUTOINCREMENT PRIMARYKEY,rule_id INTEGER,seq INTEGER,predicate_id INTEGER"
+  table_name = "querie"
+  fields = "id INTEGER PRIMARY KEY AUTOINCREMENT ,rule_id INTEGER,seq INTEGER,predicate_id INTEGER"
   
   def __init__(self, query_id, rule_id, sequence, predicate_id):
     self.query_id = query_id
@@ -73,8 +80,8 @@ class Query:
     return self.db.predicates[self.predicate_id].query(self.arguments)
 
 class Rule:
-  table_name = "rules"
-  fields = "id INTEGER AUTOINCREMENT PRIMARYKEY,predicate_id INTEGER"
+  table_name = "rule"
+  fields = "id INTEGER PRIMARY KEY AUTOINCREMENT ,predicate_id INTEGER"
    
   def __init__(self, predicate, arguments, queries: [[(str, str)]]):
     self.id = -1
@@ -109,10 +116,10 @@ class Rule:
     return sql    
 
 class Predicate:
-  table_name = "predicates"
-  fields = "id INTEGER AUTOINCREMENT PRIMARYKEY,name TEXT,arity INTEGER,table_name TEXT" 
-  def __init__(self, predicate_id, name, arity, table_name):
-    self.predicate_id = predicate_id
+  table_name = "predicate"
+  fields = "id INTEGER PRIMARY KEY AUTOINCREMENT ,name TEXT,arity INTEGER,table_name TEXT" 
+  def __init__(self, id, name, arity, table_name):
+    self.id = id
     self.name = name
     self.arity = arity
     self.table_name = table_name
@@ -170,28 +177,29 @@ class Predicate:
       return self.insert_sql([a.value for a in argument_definitions])
 
 class PredicatePart:
-  table_name = "predicate_parts"
-  fields = "id INTEGER AUTOINCREMENT PRIMARYKEY,predicate_id INTEGER,seq INTEGER,field_name TEXT,field_type TEXT"
+  table_name = "predicate_part"
+  fields = "id INTEGER PRIMARY KEY AUTOINCREMENT ,predicate_id INTEGER,seq INTEGER,field_name TEXT,field_type TEXT"
 
-  def __init__(self, predicate_part_id, predicate_id, part_number, field_name):
+  def __init__(self, id, predicate_id, seq, field_name, field_type):
     self.predicate_id = predicate_id
-    self.predicate_part_id = predicate_part_id
+    self.id = id
     self.predicate = None
-    self.part_number = part_number
+    self.seq = seq
     self.field_name = field_name
+    self.field_type = field_type
     self.predicate = None
     self.db = None
     self.links_out = []
     self.links_in = []
 
   def attach(self, db):
-    self.db.attach(self)
+    db.attach(self)
     self.predicate = self.db.data[Predicate.table_name][self.predicate_id]
     self.predicate.parts.append(self)
 
 class Link:
   table_name = "link"
-  fields = "id INTEGER AUTOINCREMENT PRIMARYKEY,link_name TEXT,local_part_id INTEGER,remote_part_id INTEGER"
+  fields = "id INTEGER PRIMARY KEY AUTOINCREMENT ,link_name TEXT,local_part_id INTEGER,remote_part_id INTEGER"
   
   def __init__(self, link_id, link_name, local_part_id, remote_part_id):
     self.link_id = link_id
@@ -255,19 +263,18 @@ class LogicDB:
     self.load()
     self._new_id_dict = {}
   
-  def execute(self, sql):
+  def execute(self, sql, **kwargs):
     conn = sqlite3.connect(self.file_name)
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS predicates
-                 (name TEXT, arity INTEGER, PRIMARY KEY (name))''')
+    c.execute(sql, kwargs)
     conn.commit()
     conn.close()
 
-  def data_query(self, sql, action=None):
+  def data_query(self, sql, action=None, **kwargs):
     conn = sqlite3.connect(self.file_name)
     conn.row_factory = _dict_factory
     c = conn.cursor()
-    rows = c.execute(sql)
+    rows = c.execute(sql, kwargs)
     for row in rows:
       if action is not None:
         yield action(**row)
@@ -276,9 +283,22 @@ class LogicDB:
     c.close()
     conn.close()
 
-  def class_query(self, cls):
-    field_names = [f.split()[0] for f in cls.fields.split(",")]
-    return self.data_query(f"SELECT {','.join(field_names)} FROM {cls.table_name}", cls)
+  def class_query(self, cls, **kwargs):
+    field_names = [_block_quote(f.split()[0]) for f in cls.fields.split(",")]  
+    where = f'where {" and ".join([f"{_block_quote(k)} = {_variablize(k)}" for k in kwargs.keys()])}' if len(kwargs.keys()) > 0 else ""
+    return self.data_query(f"SELECT {','.join(field_names)} FROM {_block_quote(cls.table_name)} {where}", cls, **kwargs)
+
+  def table(self, table_name, field_string):
+    field_string = ','.join([' '.join([_block_quote(f[0])] + f[1:]) for f in [fg.split() for fg in field_string.split(",")]])
+    cts = f"create table if not exists {_block_quote(table_name)} ({field_string})"
+    self.execute(cts)
+
+  def class_insert(self, cls, **kwargs):
+    self.table(cls.table_name, cls.fields)
+    field_names = [_block_quote(f) for f in kwargs.keys()]
+    field_vars = [_variablize(a) for a in kwargs.keys()]
+    sql = f"insert into {cls.table_name} ({','.join(field_names)}) values ({','.join(field_vars)})"
+    return self.execute(sql, **kwargs)
 
   def run(self, *lst):
     if isinstance(lst[-1], list):
@@ -314,33 +334,28 @@ class LogicDB:
       raise Exception(f"Predicate {rule_definition.predicate_name}/{len(rule_definition.arguments)} not found")
     raise Exception("Not implemented")
   
-  def create_predicate(self, name, table_name, fields_with_types): 
-    arity = len(fields_with_types)
-    if table_name != None:
-      cts = f"create table {table_name} ({','.join([' '.join(fft) for fft in fields_with_types])})"
-      self.execute(cts)
-
-      self.execute("""insert into predicates (name, arity, table_name) 
-                  values (:name, :arity, :table_name)""", 
-                  **{"name":name, "arity":arity, "table_name":table_name})
+  def create_predicate(self, name, table_name, field_string): 
+    if isinstance(field_string, list):
+      field_string  = ','.join([' '.join(f) for f in field_string])
     
-    for i, field_with_type in enumerate(fields_with_types):
-      field, field_type = field_with_type
-      self.execute("""insert into predicate_parts 
-                      (predicate_id
-                      ,seq
-                     ,field_name
-                     ,field_type)
-                   select id, :seq, :field_name, :field_type
-                   from predicate 
-                   where name = :predicate_name and arity = :arity
-                 """, 
-                 **{"predicate_name":name
-                    ,"arity":arity
-                    ,"seq":i
-                    ,"field_name":field
-                    ,"field_type":field_type})
-
+    arity = len(field_string.split(","))
+    self.table(table_name, field_string)
+    self.class_insert(Predicate, name=name, arity=arity, table_name=table_name)
+    predicate = list(self.class_query(Predicate, name=name, arity=arity))[0]
+    predicate.attach(self)
+  
+    for i, ft in enumerate(field_string.split(",")):
+      f = ft.split()
+      self.class_insert(PredicatePart, 
+                      predicate_id=predicate.id,
+                      seq=i,
+                      field_name=f[0],
+                      field_type=' '.join(f[1:]))
+    
+    predicate_parts = self.class_query(PredicatePart, predicate_id=predicate.id)
+    for predicate_part in predicate_parts:
+      predicate_part.attach(self)
+ 
   def attach(self, item):
     if not type(item).table_name in self.data.keys():
       self.data[type(item).table_name] = {}
@@ -369,7 +384,7 @@ class LogicDB:
   def query(self, fact_definition):
     # there should be a _result_number_ for each row so that. 
     # when there are no variables there is still a response.
-    
+
     predicate = self.find_predicate(fact_definition.predicate_name, len(fact_definition.arguments))
     if predicate is None:
       raise Exception(f"Predicate {fact_definition.predicate_name}/{len(fact_definition.arguments)} not found")
@@ -378,7 +393,7 @@ class LogicDB:
     
   def create(self):
     for cls in classes:
-      self.create_predicate(cls.table_name, cls.table_name, [f.split() for f in cls.fields.split(",")])
+      self.create_predicate(cls.table_name, cls.table_name, cls.fields)
                    
   def load(self):
     for cls in classes:
@@ -404,7 +419,7 @@ class LogicDB:
                         })
 
 taush._environ_["ldb"] = LogicDB("logic.db")
-taush._environ_["lisp"] = taush.taush._environ_["lisp"] | {
+taush._environ_["lisp"] = taush._environ_["lisp"] | {
   "!": lambda *args: taush._environ_["ldb"].run(list(args)),
   "?": lambda *args: taush._environ_["ldb"].fact_check(list(args)),
   "predicate": lambda *args: taush._environ_["ldb"].create_predicate(*args),
