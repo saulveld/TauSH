@@ -1,6 +1,9 @@
 import sqlite3
 import taush
 
+                          
+                     
+
 def _dict_factory(cursor, row):
     d = {}
     for idx, col in enumerate(cursor.description):
@@ -15,17 +18,17 @@ class Argument:
     self.argument_type = argument_type
     self.value = value
 
-class PredicateArgument(Argument):
-  table_name = "predicate_arguments"
-  fields = ["query_id", "argument_number", "argument", "argument_type"]
+class RuleArgument(Argument):
+  table_name = "rule_arguments"
+  fields = "id INTEGER AUTOINCREMENT PRIMARYKEY,rule_id INTEGER,seq INTEGER,argument TEXT,argument_type TEXT"
+
   def __init__(self, argument_number, argument_type, value):
     super().__init__(argument_number, argument_type, value)
 
-class RuleArgument(Argument):
-  table_name = "rule_arguments"
-  fields = ["rule_id", "argument_number", "argument", "argument_type"]
-  def __init__(self, argument_number, argument_type, value):
-    super().__init__(argument_number, argument_type, value)
+  def attach(self, db):
+    db.attach(self)
+    self.rule = db.data[Rule.table_name][self.rule_id]
+    self.rule.arguments.append(self)
 
   def to_sql(self):
     if self.argument_type == 'VAR':
@@ -35,13 +38,22 @@ class RuleArgument(Argument):
 
 class QueryArgument(Argument):
   table_name = "query_arguments"
-  fields = ["query_id", "argument_number", "argument", "argument_type"]
+  fields = "id INTEGER AUTOINCREMENT PRIMARYKEY,query_id INTEGER,seq INTEGER,argument TEXT,argument_type TEXT"
+                              
   def __init__(self, argument_number, argument_type, value):
     super().__init__(argument_number, argument_type, value)
+    self.db = None
+    self.query = None
+
+  def attach(self, db):
+    db.attach(self)
+    self.query = db.data[Query.table_name][self.query_id]
+    self.query.arguments.append(self)
 
 class Query:
   table_name = "queries"
-  fields = ["query_id", "rule_id", "sequence", "predicate_id"]
+  fields = "id INTEGER AUTOINCREMENT PRIMARYKEY,rule_id INTEGER,seq INTEGER,predicate_id INTEGER"
+  
   def __init__(self, query_id, rule_id, sequence, predicate_id):
     self.query_id = query_id
     self.rule_id = rule_id
@@ -49,13 +61,23 @@ class Query:
     self.predicate_id = predicate_id
     self.arguments = []
     self.db = None
+    self.rule = None
+    self.predicate = None
+
+  def attach(self, db):
+    db.attach(self)
+    self.rule = self.db.data[Rule.table_name][self.rule_id]
+    self.rule.queries.append(self)
+    self.predicate = self.db.data[Predicate.table_name][self.predicate_id]
+    self.predicate.queries.append(self)
 
   def to_sql(self) -> str:
     return self.db.predicates[self.predicate_id].query(self.arguments)
 
 class Rule:
   table_name = "rules"
-  fields = ["rule_id", "predicate_id"]
+  fields = "id INTEGER AUTOINCREMENT PRIMARYKEY,predicate_id INTEGER"
+   
   def __init__(self, predicate, arguments, queries: [[(str, str)]]):
     self.id = -1
     self.predicate = predicate
@@ -66,10 +88,9 @@ class Rule:
     self.predicate = None
 
   def attach(self, db):
-    self.db = db
-    self.db.rules[self.id] = self
-    self.predicate = self.db.predicates[self.predicate_id]
-
+    db.attach(self)
+    self.predicate = db.data[Predicate.table_name][self.predicate_id]
+    self.predicate.rules.append(self)
 
   def wrapping_sql(self, innersql):
     select_items = [f"{a.to_sql()}  as {self.pred.part_name(a.argument_number)}" for a in self.arguments]
@@ -91,7 +112,7 @@ class Rule:
 
 class Predicate:
   table_name = "predicates"
-  fields = ["predicate_id", "name", "arity", "table_name"]
+  fields = "id INTEGER AUTOINCREMENT PRIMARYKEY,name TEXT,arity INTEGER,table_name TEXT" 
   def __init__(self, predicate_id, name, arity, table_name):
     self.predicate_id = predicate_id
     self.name = name
@@ -99,13 +120,13 @@ class Predicate:
     self.table_name = table_name
     self.rules = []
     self.parts = []
+    self.queries = []
     self.db = None
     self.query_hook = None
     self.fact_hooks = []
   
   def attach(self, db):
-    self.db = db
-    self.db.predicates[self.predicate_id] = self
+    db.attach(self)
 
   def part_name(self, part_number):
     for part in self.parts:
@@ -152,13 +173,43 @@ class Predicate:
 
 class PredicatePart:
   table_name = "predicate_parts"
-  fields = ["predicate_part_id", "predicate_id", "part_number", "field_name"]
+  fields = "id INTEGER AUTOINCREMENT PRIMARYKEY,predicate_id INTEGER,seq INTEGER,field_name TEXT,field_type TEXT"
+
   def __init__(self, predicate_part_id, predicate_id, part_number, field_name):
     self.predicate_id = predicate_id
     self.predicate_part_id = predicate_part_id
     self.predicate = None
     self.part_number = part_number
     self.field_name = field_name
+    self.predicate = None
+    self.db = None
+    self.links_out = []
+    self.links_in = []
+
+  def attach(self, db):
+    self.db.attach(self)
+    self.predicate = self.db.data[Predicate.table_name][self.predicate_id]
+    self.predicate.parts.append(self)
+
+class Link:
+  table_name = "link"
+  fields = "id INTEGER AUTOINCREMENT PRIMARYKEY,link_name TEXT,local_part_id INTEGER,remote_part_id INTEGER"
+  
+  def __init__(self, link_id, link_name, local_part_id, remote_part_id):
+    self.link_id = link_id
+    self.link_name = link_name
+    self.local_part_id = local_part_id
+    self.remote_part_id = remote_part_id
+    self.local_part = None
+    self.remote_part = None
+    self.db = None
+
+  def attach(self, db):
+    db.attach(self)
+    self.local_part = self.db.predicate_parts[self.local_part_id]
+    self.local_part.links_out.append(self)
+    self.remote_part = self.db.predicate_parts[self.remote_part_id]
+    self.local_part.links_in.append(self)
 
 class ArgumentDefintion:
   def __init__(self, value):
@@ -196,15 +247,12 @@ class CustomPredicate:
     self.arity = len(arguments)
     self.action = self.action
 
+classes = [Predicate, PredicatePart, Rule, RuleArgument, Query, QueryArgument, Link]
+
 class LogicDB:
   def __init__(self, file_name):
     self.file_name = file_name
-    self.predicates = {}
-    self.predicate_parts = {}
-    self.rules = {}
-    self.rule_arguments = {}
-    self.queries = {}
-    self.query_arguments = {}
+    self.data = {}
     self.create()
     self.load()
     self._new_id_dict = {}
@@ -231,7 +279,8 @@ class LogicDB:
     conn.close()
 
   def class_query(self, cls):
-    return self.data_query(f"SELECT {','.join(cls.fields)} FROM {cls.table_name}", cls)
+    field_names = [f.split()[0] for f in cls.fields.split(",")]
+    return self.data_query(f"SELECT {','.join(field_names)} FROM {cls.table_name}", cls)
 
   def run(self, lst):
     
@@ -264,9 +313,10 @@ class LogicDB:
       raise Exception(f"Predicate {rule_definition.predicate_name}/{len(rule_definition.arguments)} not found")
     raise Exception("Not implemented")
   
-  def create_predicate(self, name, arity, table_name, fields_with_types): 
+  def create_predicate(self, name, table_name, fields_with_types): 
+    arity = len(fields_with_types)
     if table_name != None:
-      cts = f"create table {table_name} ({','.join([f'{fft[0]} {fft[1]}' for fft in fields_with_types])})"
+      cts = f"create table {table_name} ({','.join([' '.join(fft) for fft in fields_with_types])})"
       self.execute(cts)
 
       self.execute("""insert into predicates (name, arity, table_name) 
@@ -289,6 +339,12 @@ class LogicDB:
                     ,"seq":i
                     ,"field_name":field
                     ,"field_type":field_type})
+
+  def attach(self, item):
+    if not type(item).table_name in self.data.keys():
+      self.data[type(item).table_name] = {}
+    item.db = self
+    self.data[type(item).table_name][item.id] = item
 
   def _new_id(self, type_name):
     new_id = self._new_id.get(type_name, -1)
@@ -317,75 +373,18 @@ class LogicDB:
     return self.data_query(sql)
     
   def create(self):
-    self.create_predicate("predicate", 
-                          3, 
-                          "predicate", 
-                          [
-                            ("id", "INTEGER AUTOINCREMENT PRIMARYKEY"), 
-                            ("name", "TEXT"), 
-                            ("arity", "INTEGER"),
-                            ("table_name", "TEXT")
-                          ])
-    self.create_predicate("predicate_part",
-                          4,
-                          "predicate_part",
-                          [
-                            ("id", "INTEGER AUTOINCREMENT PRIMARYKEY"),
-                            ("predicate_id", "INTEGER"),
-                            ("seq", "INTEGER"),
-                            ("field_name", "TEXT"),
-                            ("field_type", "TEXT")
-                          ])
-    self.create_predicate("rule",
-                          2,
-                          "rule",
-                          [
-                            ("id", "INTEGER AUTOINCREMENT PRIMARYKEY"),
-                            ("predicate_id", "INTEGER")
-                          ])
-    self.create_predicate("rule_argument",
-                          4,
-                          "rule_argument",
-                          [
-                            ("id", "INTEGER AUTOINCREMENT PRIMARYKEY"),
-                            ("rule_id", "INTEGER"),
-                            ("seq", "INTEGER"),
-                            ("argument", "TEXT"),
-                            ("argument_type", "TEXT")
-                          ])
-    self.create_predicate("query",
-                          4,
-                          "query",
-                          [
-                            ("id", "INTEGER AUTOINCREMENT PRIMARYKEY"),
-                            ("rule_id", "INTEGER"),
-                            ("seq", "INTEGER"),
-                            ("predicate_id", "INTEGER")
-                          ])
-    self.create_predicate("query_argument",
-                          4,
-                          "query_argument",
-                          [
-                            ("id", "INTEGER AUTOINCREMENT PRIMARYKEY"),
-                            ("query_id", "INTEGER"),
-                            ("seq", "INTEGER"),
-                            ("argument", "TEXT"),
-                            ("argument_type", "TEXT")
-                          ])
-    self.create_predicate("link",
-                          5,
-                          "link",
-                          [
-                            ("id", "INTEGER AUTOINCREMENT PRIMARYKEY"),
-                            ("link_name", "TEXT"),
-                            ("local_part_id", "INTEGER"),
-                            ("remote_part_id", "INTEGER"),
-                            ("seq", "INTEGER")
-                          ])
-                          
+    for cls in classes:
+      self.create_predicate(cls.table_name, cls.table_name, [f.split() for f in cls.fields.split(",")])
+                   
+  def load(self):
+    for cls in classes:
+      for row in self.class_query(cls):
+        row.attach(self)
+
   def create_link(self, name, local_and_remotes):
     for index, pair in enumerate(local_and_remotes):
       local, remote = pair
+      # this will also need to make or modify the foreign key
       self.execute("""insert into link (link_name, local_part_id, remote_part_id)
                       select l.id, r.id
                       from predicate_part l, predicate_part r
@@ -398,17 +397,12 @@ class LogicDB:
                         ,"local_seq":local.seq
                         ,"remote_predicate_id":remote.predicate_id
                         ,"remote_seq":remote.seq
-                        })                   
-                          
-  def load(self):
-    classes = [Predicate, PredicatePart, Rule, RuleArgument, Query, QueryArgument]
-    for cls in classes:
-      for row in self.class_query(cls):
-        row.attach(self)
+                        })
 
 taush._environ_["ldb"] = LogicDB("logic.db")
 taush._environ_["lisp"] = taush.taush._environ_["lisp"] | {
   "!": lambda *args: taush._environ_["ldb"].run(list(args)),
   "predicate": lambda *args: taush._environ_["ldb"].create_predicate(*args),
+  "link": lambda *args: taush._environ_["ldb"].create_link(*args),
 }
 
