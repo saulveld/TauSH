@@ -1,5 +1,3 @@
-import sys
-sys.path.append('.')
 import sqlite3
 import taush
 
@@ -418,11 +416,12 @@ class LogicDB:
                         ,"remote_seq":remote.seq
                         })
 
-taush._environ_["ldb"] = LogicDB("logic.db")
-taush._environ_["lisp"] = taush._environ_["lisp"] | {
-  "!": lambda *args: taush._environ_["ldb"].run(list(args)),
-  "?": lambda *args: taush._environ_["ldb"].fact_check(list(args)),
-  "predicate": lambda *args: taush._environ_["ldb"].create_predicate(*args),
-  "link": lambda *args: taush._environ_["ldb"].create_link(*args),
-}
+def on_load(instance):
+  instance["ldb"] = LogicDB("logic.db")
+  instance["lisp"] = instance["lisp"] | {
+    "!": lambda *args: instance["ldb"].run(list(args)),
+    "?": lambda *args: instance["ldb"].fact_check(list(args)),
+    "predicate": lambda *args: instance["ldb"].create_predicate(*args),
+    "link": lambda *args: instance["ldb"].create_link(*args),
+  }
 

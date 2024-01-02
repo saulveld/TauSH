@@ -59,3 +59,6 @@ def lines(items):
 
 def echo(*a):
   return ' '.join([str(i) for i in a])
+
+def on_load(instance):
+  print ("Loaded std module")

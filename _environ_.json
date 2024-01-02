@@ -8,7 +8,12 @@
   },
   "init": {
     "file": "init.tau",
-    "modules": ["std.py", "lisp.py", "logicdb.py"]
+    "modules": ["parts.py", "std.py", "lisp.py", "logicdb.py"]
   },
-  "lisp": {}
+  "lisp": {},
+  "statement": {
+    "segments": [],
+    "binaries": [],
+    "prefixes": []
+  }
 }
