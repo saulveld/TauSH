@@ -2,6 +2,7 @@
 from functools import reduce
 import sys
 sys.path.append("./modules")
+sys.path.append(".")
 import parts
 import os
 import shutil
